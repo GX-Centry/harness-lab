@@ -1,0 +1,40 @@
+{
+  "name": "harness-lab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "从零手写的教学级 Agent Harness 框架：Agent Loop / Tool Dispatch / Context / Permission / Session / Hook 全栈实现，附 LangGraph 对照适配层。代码即教程。",
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "dev": "tsx src/cli/main.ts",
+    "chat": "tsx src/cli/main.ts chat",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lab": "tsx scripts/lab.ts",
+    "web": "tsx scripts/web.ts",
+    "mock-llm": "tsx scripts/mock-llm.ts",
+    "scenarios": "tsx scenarios/run.ts"
+  },
+  "keywords": [
+    "agent",
+    "harness",
+    "llm",
+    "teaching",
+    "agent-loop",
+    "tool-dispatch"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@langchain/langgraph": "1.4.19",
+    "@types/node": "26.6.4",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  }
+}

@@ -1,0 +1,31 @@
+# ============================================================
+# harness-lab .gitattributes
+# 目的：在 Windows 开发机上强制 LF 换行，避免 CRLF 噪声 diff；
+#       明确文本文件编码均为 UTF-8。
+# 背景：本机 git core.autocrlf 未配置（环境核查结论），
+#       因此在仓库层面显式固定换行策略，而非依赖全局配置。
+# ============================================================
+
+* text=auto eol=lf
+
+*.ts    text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sql   text eol=lf
+*.txt   text eol=lf
+
+# 二进制文件不做换行转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.sqlite binary
+*.xlsx  binary
+
+# PowerShell 脚本保持 CRLF（Windows 原生体验更好；仅为兼容备注）
+*.ps1   text eol=crlf

@@ -1,0 +1,40 @@
+{
+  // ============================================================
+  // harness-lab TypeScript 配置
+  // 设计决策：
+  //  1. verbatimModuleSyntax + erasableSyntaxOnly：
+  //     强制只用「可擦除」的类型语法（禁用 enum/namespace 等带运行时语义的
+  //     语法），保证将来可以直接用 Node 原生 type-stripping 运行 .ts，
+  //     无需任何转译器。详见 docs/02-design-decisions.md。
+  //  2. allowImportingTsExtensions + rewriteRelativeImportExtensions：
+  //     所有相对导入显式写 `.ts` 扩展名 —— 这正是 Node 原生运行 TS 的要求，
+  //     tsc 构建时再将其改写为 `.js`。
+  //  3. noUncheckedIndexedAccess：教学项目，强制处理数组越界/字典缺失，
+  //     让「经得起盘问」落实到类型层面。
+  // ============================================================
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "scenarios/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
