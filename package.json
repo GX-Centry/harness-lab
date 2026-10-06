@@ -2,7 +2,7 @@
   "name": "harness-lab",
   "version": "0.1.0",
   "private": true,
-  "description": "从零手写的教学级 Agent Harness 框架：Agent Loop / Tool Dispatch / Context / Permission / Session / Hook 全栈实现，附 LangGraph 对照适配层。代码即教程。",
+  "description": "从零手写的教学级 Agent Harness（Loop/Dispatch/Context/Permission/Session/Hook + LangGraph 对照层）· A from-scratch teaching-grade LLM Agent Harness in TypeScript. 代码即教程 / Code is the tutorial.",
   "type": "module",
   "engines": {
     "node": ">=26"
