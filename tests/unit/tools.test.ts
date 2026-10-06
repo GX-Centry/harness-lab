@@ -198,7 +198,11 @@ describe('fs 工具', () => {
   });
 
   it('绝对路径越界 → permission_denied', async () => {
-    const result = await fsWriteTool.execute({ path: 'C:\\Windows\\temp-evil.txt', content: 'x' }, makeCtx(workDir));
+    // 用 workDir 的父目录构造绝对路径：Windows / Linux 语义一致。
+    // 踩坑记录：不要写死 'C:\\Windows\\...' 之类的平台路径——在 Linux 上反斜杠不是分隔符，
+    // 该字符串会被当作合法相对文件名（解析进工作目录内），导致 CI 上断言失败。
+    const outsideAbs = path.resolve(workDir, '..', 'temp-evil.txt');
+    const result = await fsWriteTool.execute({ path: outsideAbs, content: 'x' }, makeCtx(workDir));
     // 注意：仅当该绝对路径不在工作目录内才是越界（教学环境成立）
     expect(errorCodeOf(result)).toBe('permission_denied');
   });
