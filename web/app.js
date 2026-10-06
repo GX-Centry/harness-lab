@@ -36,7 +36,7 @@ const el = {
   banner: $('confirm-banner'), cfTool: $('cf-tool'), cfRisk: $('cf-risk'), cfArgs: $('cf-args'),
   cfApprove: $('cf-approve'), cfDeny: $('cf-deny'),
   // 服务设置弹层（Provider 热切换 + 连通测试）
-  providerChip: $('provider-chip'), btnSettings: $('btn-settings'),
+  providerChip: $('provider-chip'), modeChip: $('mode-chip'), btnSettings: $('btn-settings'),
   overlay: $('settings-overlay'), btnSettingsClose: $('btn-settings-close'),
   spPreset: $('sp-preset'), spPresetHint: $('sp-preset-hint'), spBaseurl: $('sp-baseurl'),
   spModel: $('sp-model'), spApikey: $('sp-apikey'), spResult: $('sp-result'),
@@ -107,6 +107,7 @@ const PRESETS = [
   ['/status', '命令拦截：不进模型'],
   ['/compact', '上下文组装 dry-run'],
   ['/skill math-report 21*2', '技能：确定性编排（不进模型）'],
+  ['/mode semi', '权限模式：半自动（low/medium 自动放行）'],
   ['/help', '命令清单'],
   ['请记住：我偏好简短的回答', '观察记忆层是否写回'],
 ];
@@ -126,6 +127,7 @@ const state = {
   liveBusy: false,   // 实时忙闲（与回放 cursor 无关）
   sessionId: null,
   providerMeta: null, // 当前 Provider 元数据（hello 快照 / provider_changed 增量）
+  permissionMode: null, // 权限模式（hello 快照 / permission_mode_changed 增量；w18）
 };
 
 let rafId = 0;
@@ -745,6 +747,7 @@ function onWireMessage(msg) {
     if (msg.type === 'query_submitted') state.liveBusy = true;
     if (msg.type === 'query_done' || msg.type === 'query_error') state.liveBusy = false;
     if (msg.type === 'provider_changed') setProviderMeta(msg.provider);
+    if (msg.type === 'permission_mode_changed') setModeMeta(msg.mode, msg.description);
   }
   scheduleRender();
 }
@@ -760,6 +763,7 @@ function connect() {
       el.sessionChip.title = `会话状态：${info.state ?? '?'}`;
       state.liveBusy = Boolean(info.busy);
       if (info.provider) setProviderMeta(info.provider);
+      if (info.permissionMode) setModeMeta(info.permissionMode, info.permissionModeDescription);
       setConn('ok', '已连接');
     } catch { /* 忽略畸形 hello */ }
   });
@@ -791,6 +795,37 @@ function setProviderMeta(info) {
   el.providerChip.title = real
     ? `真实 API：${info.model} @ ${info.baseUrl}${info.hasApiKey ? '' : '（未配置 key）'}`
     : '离线演示：规则 Provider（确定性、无网络）——点右侧「服务设置」切换';
+}
+
+/**
+ * 权限模式徽章（w18）：manual=中性灰 / semi=琥珀 / auto=绿；点击循环切换。
+ * 描述文案由服务端下发（与 CLI 同源）——前端不重写一份。
+ */
+const MODE_CYCLE = { manual: 'semi', semi: 'auto', auto: 'manual' };
+
+function setModeMeta(mode, description) {
+  if (!mode) return;
+  state.permissionMode = mode;
+  el.modeChip.textContent = mode;
+  const next = MODE_CYCLE[mode] ?? 'manual';
+  el.modeChip.title = `${description ? description + '——' : ''}点击切换（${mode} → ${next}）`;
+  el.modeChip.className = 'chip chip-mode mono mode-' + mode;
+}
+
+/** 点击徽章：切到下一档（POST 成功后由 permission_mode_changed 广播回填——单一回写路径） */
+async function cyclePermissionMode() {
+  const next = MODE_CYCLE[state.permissionMode] ?? 'manual';
+  try {
+    const r = await fetch('/api/permission-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: next }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) flashNotice(String(data.error ?? `请求失败（${r.status}）`));
+  } catch (error) {
+    flashNotice('网络错误：' + String(error));
+  }
 }
 
 /** 表单 → localStorage（仅本机浏览器；打开弹层时回填） */
@@ -1025,6 +1060,7 @@ function bindEvents() {
   });
   el.cfApprove.addEventListener('click', () => { void settleConfirm(true); });
   el.cfDeny.addEventListener('click', () => { void settleConfirm(false); });
+  el.modeChip.addEventListener('click', () => { void cyclePermissionMode(); });
 
   // 服务设置弹层
   el.btnSettings.addEventListener('click', () => { void openSettings(); });

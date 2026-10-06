@@ -2,7 +2,7 @@
  * 内置命令集合 —— 控制面的最小可用户子集。
  *
  * 组装顺序即 /help 的展示顺序（注册顺序 = 列表顺序）。
- * 注意 help 是工厂（需要 registry 引用），其余四个直接导出常量——
+ * 注意 help 是工厂（需要 registry 引用），其余直接导出常量——
  * 差异原因见 help.ts 文件头。
  */
 
@@ -13,8 +13,10 @@ import { statusCommand } from './status.ts';
 import { historyCommand } from './history.ts';
 import { compactCommand } from './compact.ts';
 import { skillCommand } from './skill.ts';
+import { modeCommand } from './mode.ts';
+import { hooksCommand } from './hooks.ts';
 
-export { createHelpCommand, statusCommand, historyCommand, compactCommand, skillCommand };
+export { createHelpCommand, statusCommand, historyCommand, compactCommand, skillCommand, modeCommand, hooksCommand };
 
 /**
  * 返回全部内置命令的工厂。
@@ -31,5 +33,7 @@ export function createBuiltinCommands(registry: CommandRegistry): CommandDefinit
     historyCommand,
     compactCommand,
     skillCommand,
+    modeCommand,
+    hooksCommand,
   ];
 }

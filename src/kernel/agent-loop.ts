@@ -223,10 +223,12 @@ export interface AgentLoopOptions {
    */
   readonly contextManager?: ContextManager;
   /**
-   * 系统提示词直通接缝（w09 ContextManager 到位前的临时通道）。
-   * 注入规则：history 首位已是 system 消息时不重复注入（幂等）。
-   * 演进：w09 之后 system 层由 ContextManager 统一组装，本选项降级为
-   * 「初始 system 内容的来源」。
+   * 系统提示词接缝（w09 引入，w18 修订为「刷新语义」）。
+   * 注入规则：history 无 system 时置入首位；已有 system 时**替换为当前值**
+   * ——system prompt 自 w18 起携带工具面/技能面清单（动态内容），
+   * 会话恢复（--continue）或消息跨轮复用时若保留旧快照，模型会持有
+   * 过期的能力认知（「不知道技能存在」）。替换不改变消息数量，
+   * 与持久化差量（按 persistedCount 切片）的计数契约兼容。
    */
   readonly systemPrompt?: string;
   /** 时钟注入（latencyMs 计算；默认 Date.now） */
@@ -278,8 +280,17 @@ export class AgentLoop {
   ): AsyncGenerator<LoopEvent, LoopResult, void> {
     // ---- 工作副本：Loop 是唯一可变拥有者 ----
     const messages: Message[] = [...history];
-    if (this.systemPrompt !== undefined && !messages.some((m) => m.role === 'system')) {
-      messages.unshift(systemMessage(this.systemPrompt));
+    if (this.systemPrompt !== undefined) {
+      // system prompt 刷新语义（w18）：已有 system → 替换；无 → 置入首位。
+      // 为什么从「不重复注入」改为「替换」？w18 起 system prompt 携带
+      // 工具/技能清单，恢复会话必须刷新到最新装配的事实（旧演示文案
+      // 会让模型不知道技能存在）。
+      const sysIndex = messages.findIndex((m) => m.role === 'system');
+      if (sysIndex >= 0) {
+        messages[sysIndex] = systemMessage(this.systemPrompt);
+      } else {
+        messages.unshift(systemMessage(this.systemPrompt));
+      }
     }
     messages.push(userMessage(input));
 

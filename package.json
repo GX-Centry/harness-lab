@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx src/cli/main.ts",
     "chat": "tsx src/cli/main.ts chat",
+    "preflight": "tsx scripts/preflight.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

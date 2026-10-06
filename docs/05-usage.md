@@ -19,7 +19,7 @@
 
 ```bash
 pnpm install     # 安装依赖（zod + typescript / tsx / vitest / @types/node / @langchain/langgraph）
-pnpm test        # ① 三层测试套件：31 个文件 / 351 用例全绿（~9s）
+pnpm test        # ① 三层测试套件：34 个文件 / 415 用例全绿（~9s）
 pnpm lab         # ② 九幕端到端演示：A→I 全部路径 + 终幕读回（~秒级）
 pnpm scenarios   # ③ 12 场景评估报告：行为断言 + CI 退出码（~100ms）
 ```
@@ -28,8 +28,8 @@ pnpm scenarios   # ③ 12 场景评估报告：行为断言 + CI 退出码（~10
 
 ```text
 # pnpm test
- Test Files  31 passed (31)
-      Tests  351 passed (351)
+ Test Files  34 passed (34)
+      Tests  415 passed (415)
 
 # pnpm lab（收官行）
 ✔ 全部幕次执行完毕——持久化 / 重启续问 / 优雅取消 / 崩溃补位 / 跨会话记忆 /
@@ -60,12 +60,13 @@ pnpm scenarios   # ③ 12 场景评估报告：行为断言 + CI 退出码（~10
 |---|---|---|
 | `pnpm install` | 安装依赖 | 依据 `package.json` + `pnpm-lock.yaml` |
 | `pnpm typecheck` | 类型检查 | `tsc --noEmit`，零错误 |
-| `pnpm test` | 三层测试套件 | 31 文件 / 351 用例；`pnpm test:watch` 进入监听模式 |
+| `pnpm test` | 三层测试套件 | 34 文件 / 415 用例；`pnpm test:watch` 进入监听模式 |
 | `pnpm lab` | 九幕端到端演示 | `scripts/lab.ts`——既是冒烟证据，也是「装配手册」 |
 | `pnpm scenarios` | 12 场景评估集 | 仓库根 `scenarios/`；报告 + CI 退出码 |
 | `pnpm chat` / `pnpm dev` | CLI 对话 | 见本册 §3 |
 | `pnpm web` | 网页观测台 | 第四条壳（HTTP+SSE）；六阶段 + 七层可视化 |
 | `pnpm mock-llm` | 本地 OpenAI 兼容 mock | 连通测试靶子；无 key 演示真实协议全链路 |
+| `pnpm preflight` | 环境预检（体检报告） | Node / 平台 / bash·git / 环境变量冲突；error 时退出码 1 |
 
 ---
 
@@ -76,13 +77,27 @@ pnpm chat                        # 交互式 REPL（/exit 退出 · Ctrl+C 取�
 pnpm chat -p "帮我算 12*(3+4)"    # 单次问答后退出（脚本友好）
 pnpm chat --session demo         # 指定 / 复用会话（不存在则创建）
 pnpm chat --continue             # 继续最近一次会话
-pnpm chat --yes                  # 自动批准权限确认（无人值守 / 演示）
+pnpm chat --mode semi            # 权限模式：manual（缺省）/ semi / auto
+pnpm chat --yes                  # 等价 --mode auto（无人值守 / 演示——旧习惯保留）
 ```
 
 对话模式默认使用**规则驱动的确定性演示 Provider**（`src/cli/demo.ts`，离线、
 零成本、可复现）——REPL 要展示的主体是会话 / 记忆 / 命令 / 子代理 / 权限这条
 管道，而非模型的智能程度。要接**真实 OpenAI 兼容 API**（DeepSeek / OpenAI /
 Ollama…）见 §5——换真实模型 = 换一个 `LLMProvider` 实现，替换点仍然只有一处。
+
+**权限模式三档**（w18——「全自动 / 半自动」诉求的落点）：
+
+| 模式 | 确认行为 | 适用 |
+|---|---|---|
+| `manual` | 每个确认决策都询问用户（缺省——行为不变） | 学习 / 审查每一步 |
+| `semi` | low + medium 风险自动放行；high / critical 仍询问 | 日常使用 |
+| `auto` | 全部自动批准（reason 如实标注「未询问用户」） | 无人值守 / 演示 |
+
+安全边界不随模式消失：规则 `deny` 仍然拒绝、hook `block` 仍然阻断；manual /
+semi 下没有确认通道（非交互终端）仍 fail-safe 拒绝。启动时可用 `--mode` /
+`--yes` / 环境变量 `HARNESS_PERMISSION_MODE` 设定（后写胜）；运行中 `/mode`
+随时切换——即时生效（不重启、不断会话）。
 
 ---
 
@@ -104,6 +119,8 @@ pnpm web     # 启动网页控制台 → 浏览器打开 http://127.0.0.1:4173�
 - **权限确认**：web 壳把 ConfirmHandler 桥到浏览器横幅（120s 超时自动拒绝）
 - **服务设置**：顶栏热切换模型来源——预设服务商 / 自定义 URL / 连通测试
   （见 §5）
+- **权限模式**：顶栏 chip 显示当前模式（manual / semi / auto），点击循环
+  切换——与 CLI 同一套语义，服务端为唯一真相源，广播即刷新
 - 数据写入 `data/web.db`（与 CLI 同库同构）；端口可用 `HARNESS_WEB_PORT` 覆盖
 
 ---
@@ -172,3 +189,13 @@ pnpm mock-llm    # 本地 OpenAI 兼容 mock（http://127.0.0.1:8099/v1，Ctrl+C
   调试体验（ADR-012）；scripts 默认用 tsx 运行以兼容生态习惯。
 - **Windows 下有什么坑？** 见 `00-environment.md` §4 坑点清单
   （PowerShell 用 `;` 分隔、不用重定向写文件、控制台编码 65001 等）。
+- **启动时出现「环境预检未通过」怎么办？** 预检在启动前检查 Node 版本 /
+  bash·git 可用性 / 环境变量冲突——error 才阻止启动（warn 只打一行提示）。
+  先跑 `pnpm preflight` 看完整报告与处置建议（hint），修完再启动。
+- **我设置了全局 `OPENAI_API_KEY`，为什么 harness 不认？** harness 只读
+  `HARNESS_LLM_*` 三个显式变量（防跨工具串味）；预检检测到这类冲突会 warn
+  提醒。显式设置或写进 `.env` 即可。
+- **接入真实 API 后，技能（skill）怎么被模型调用？** 每个技能都以
+  `skill_<名称>` 工具形式进入模型的 tools 参数，由模型自主决定何时调用
+  （如「用技能出报告 21*2」）；也可用 `/skill` 命令手动执行——两条路径同链
+  （都经 Dispatcher / 权限 / Hook）。`/hooks` 可查看 Hook 管道现状。

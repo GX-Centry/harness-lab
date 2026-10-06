@@ -36,6 +36,8 @@
 
 import type { ContextManager } from '../context/manager.ts';
 import type { EventBus } from '../kernel/events.ts';
+import type { HookPipeline } from '../hooks/pipeline.ts';
+import type { PermissionModeController } from '../permission/modes.ts';
 import type { SessionManager } from '../session/session-manager.ts';
 import type { SessionStore } from '../session/store.ts';
 import type { SkillServices } from '../skills/index.ts';
@@ -63,6 +65,13 @@ export interface CommandContext {
   readonly contextManager?: ContextManager | undefined;
   /** 技能服务门面（/skill 消费；未装配时为 undefined） */
   readonly skills?: SkillServices | undefined;
+  /**
+   * 权限模式控制器（/mode 消费，w18；未装配时为 undefined）。
+   * 读写同一个引用：setMode 的切换对后续每次权限检查立即生效。
+   */
+  readonly permissionMode?: PermissionModeController | undefined;
+  /** Hook 管道（/hooks 消费，w18：只读展示已注册横切逻辑；未装配时为 undefined） */
+  readonly hooks?: HookPipeline | undefined;
   /** 工具沙箱根目录（/skill 透传给技能执行器） */
   readonly workingDir: string;
   readonly bus: EventBus;

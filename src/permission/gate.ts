@@ -1,9 +1,12 @@
 /**
  * PermissionGate —— 权限决策的唯一入口（决策三态：allow / confirm / deny）。
  *
- * 决策优先级（两条来源，顺序是刻意的）：
+ * 决策优先级（三条来源，顺序是刻意的）：
  *   1. **规则匹配**（rules.ts）：显式声明优先于推导；
- *   2. **风险级默认策略**（config.permission.policyByRisk）：规则之外的兜底。
+ *   2. **风险级默认策略**（config.permission.policyByRisk）：规则之外的兜底；
+ *   3. **权限模式**（modes.ts，w18 新增）：决策链走到 confirm 时，按当前模式
+ *      决定「自动批准」还是「真的去问人」——manual 全问 / semi 自动放行
+ *      low+medium / auto 全部自动批准。
  *   confirm 决策统一走「确认交互」——CLI 询问、未来 Web 形态下异步等待。
  *
  * 三个重要的设计语义：
@@ -12,14 +15,18 @@
  *     本模块的决策逻辑对交互形态零假设（这是为预留模块 Web-SSE 铺的路）；
  *   - **fail-safe（失败安全）**：无确认通道 → 拒绝；确认超时 → 拒绝。
  *     「无人应答时放行」是最危险的失败方向，任何不确定都倾向 deny；
+ *   - **模式不越权**：模式只在 confirm 层生效——规则 deny 仍拒绝、
+ *     hook block 仍阻断（模式改变的是「要不要问人」，不是「能不能做」）；
  *   - **决策即数据**：gate 只返回决策与理由，不执行、不抛错、不发事件——
  *     事件由 Dispatcher 统一上报（权限模块零外部依赖，纯函数化便于测试）。
  *
- * 依赖方向：permission/gate.ts → config.ts / types.ts / rules.ts。
+ * 依赖方向：permission/gate.ts → config.ts / types.ts / rules.ts / modes.ts。
  */
 
 import type { PermissionConfig } from '../config.ts';
 import type { PermissionDecision, RiskLevel } from '../types.ts';
+import { SEMI_AUTO_APPROVE_RISK } from './modes.ts';
+import type { PermissionModeController } from './modes.ts';
 import type { PermissionRule } from './rules.ts';
 import { findRule } from './rules.ts';
 
@@ -37,8 +44,8 @@ export interface PermissionRequest {
   readonly input: unknown;
 }
 
-/** 决策来源：规则 / 风险策略 / 确认交互（审计价值：知道「为什么是这个决策」） */
-export type PermissionDecisionSource = 'rule' | 'risk_policy' | 'confirm';
+/** 决策来源：规则 / 风险策略 / 权限模式 / 确认交互（审计价值：知道「为什么是这个决策」） */
+export type PermissionDecisionSource = 'rule' | 'risk_policy' | 'mode' | 'confirm';
 
 /** 决策结果 */
 export interface PermissionOutcome {
@@ -65,6 +72,13 @@ export interface PermissionGateOptions {
    * 这在「非交互环境」（CI、测试）里是正确的默认行为。
    */
   readonly confirm?: ConfirmHandler;
+  /**
+   * 权限模式控制器（w18）。缺省 = manual（全部确认都询问）——
+   * 与加模式之前的行为完全一致（向后兼容）。
+   * 持有引用而非快照：模式在运行期可切换（/mode、Web API），
+   * 每次 check 读取最新值。
+   */
+  readonly mode?: PermissionModeController;
 }
 
 // ===========================================================================
@@ -83,11 +97,13 @@ export class PermissionGate {
   private readonly config: PermissionConfig;
   private readonly rules: readonly PermissionRule[];
   private readonly confirm: ConfirmHandler | undefined;
+  private readonly mode: PermissionModeController | undefined;
 
   constructor(options: PermissionGateOptions) {
     this.config = options.config;
     this.rules = options.rules ?? [];
     this.confirm = options.confirm;
+    this.mode = options.mode;
   }
 
   /**
@@ -104,25 +120,59 @@ export class PermissionGate {
   }
 
   private async decide(request: PermissionRequest): Promise<PermissionOutcome> {
-    // 1) 规则优先
+    // 1) 规则优先（显式声明优先于推导——deny/allow 的规则裁决与模式无关）
     const rule = findRule(this.rules, request.toolName);
-    if (rule !== undefined) {
-      if (rule.decision !== 'confirm') {
-        return { decision: rule.decision, source: 'rule', reason: rule.reason };
-      }
-      return this.confirmFlow(request, `规则要求确认（${rule.reason}）`);
+    if (rule !== undefined && rule.decision !== 'confirm') {
+      return { decision: rule.decision, source: 'rule', reason: rule.reason };
     }
 
-    // 2) 风险级默认策略
+    // 2) 风险级默认策略（无规则命中时才生效）
     const policy: PermissionDecision = this.config.policyByRisk[request.risk];
-    if (policy !== 'confirm') {
+    if (rule === undefined && policy !== 'confirm') {
       return {
         decision: policy,
         source: 'risk_policy',
         reason: `默认策略：风险级 ${request.risk} → ${policy}`,
       };
     }
-    return this.confirmFlow(request, `风险级 ${request.risk} 需要确认（默认策略）`);
+
+    // 3) 走到这里 = 需要 confirm（规则或策略要求）——先过权限模式：
+    //    auto：全部自动批准；semi：low/medium 自动批准（高风险级仍询问）
+    const auto = this.autoApproveByMode(request.risk);
+    if (auto !== undefined) return auto;
+
+    // 4) manual（或 semi 的高风险级）：走确认交互（fail-safe 语义不变）
+    const baseReason =
+      rule !== undefined ? `规则要求确认（${rule.reason}）` : `风险级 ${request.risk} 需要确认（默认策略）`;
+    return this.confirmFlow(request, baseReason);
+  }
+
+  /**
+   * 权限模式的自动批准判定（w18）。返回 undefined = 该由确认交互处理。
+   *
+   * 为什么放在 gate（而不是包装 ConfirmHandler）？
+   *   confirmFlow 的结局文案会写「用户已确认/拒绝」——模式自动批准**不是**
+   *   用户确认。若靠装饰 handler 实现，审计理由会说谎（「用户已确认」但
+   *   用户根本不在场）。在决策链上先行短路，理由才能如实写「模式自动批准」
+   *   （source='mode'）——审计与 Web 观察面板看到的都是真相。
+   */
+  private autoApproveByMode(risk: RiskLevel): PermissionOutcome | undefined {
+    const mode = this.mode?.mode; // 缺省控制器 = manual（向后兼容）
+    if (mode === 'auto') {
+      return {
+        decision: 'allow',
+        source: 'mode',
+        reason: `权限模式 auto：风险级 ${risk} 自动批准（未询问用户）`,
+      };
+    }
+    if (mode === 'semi' && SEMI_AUTO_APPROVE_RISK.includes(risk)) {
+      return {
+        decision: 'allow',
+        source: 'mode',
+        reason: `权限模式 semi：风险级 ${risk} ≤ medium，自动批准（未询问用户）`,
+      };
+    }
+    return undefined;
   }
 
   /** 确认流程：调用 ConfirmHandler + 超时保护（超时 = 拒绝） */

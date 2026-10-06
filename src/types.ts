@@ -247,6 +247,19 @@ export type PermissionDecision =
   | 'confirm' // 待人工确认（CLI 交互；未来 Web 形态下是异步等待——所以必须抽象）
   | 'deny'; // 拒绝：生成 permission_denied 工具结果返回给模型
 
+/**
+ * 权限运行模式（三档）—— 对「confirm 决策」的处理姿态：
+ *   manual 全手动：每个 confirm 决策都走确认交互（缺省，最安全——逐步批准）；
+ *   semi   半自动：low/medium 自动放行；high/critical 仍走确认交互；
+ *   auto   全自动：confirm 决策自动批准（rules 的显式 deny 仍然拦截——
+ *          模式只改变「确认层」的姿态，不改变「规则层」的裁决）。
+ *
+ * 为什么模式不放进 PermissionDecision？决策三态是「单次调用的结局」；
+ * 模式是「一段时间的运行姿态」——两个维度正交，混在一起会让决策链读不懂。
+ * 实现见 permission/modes.ts（控制器 + 解析）与 gate.ts（决策链里的消费点）。
+ */
+export type PermissionMode = 'manual' | 'semi' | 'auto';
+
 // ===========================================================================
 // §5 Tool 协议（工具作者的唯一契约）
 // ===========================================================================

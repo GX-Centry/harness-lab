@@ -56,6 +56,8 @@
  *   GET  /               静态页（web/index.html + styles.css + app.js）
  *   GET  /api/stream     SSE：hello 快照 + wire 全量重放 + 实时消息
  *   GET  /api/session    会话快照（id/状态/忙闲）——调试与刷新用
+ *   GET  /api/permission-mode  当前权限模式（mode + 描述 + 可选值表）
+ *   POST /api/permission-mode  { mode } 切换权限模式（运行期即时生效；w18）
  *   GET  /api/provider   当前 Provider 元数据 + 预设服务商表（设置面板用）
  *   POST /api/query      { input } 提交一轮输入（单飞锁：忙时 409）
  *   POST /api/abort      中断当前 query（协作式取消）
@@ -75,7 +77,7 @@ import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCliApp, createDemoProvider, describeError } from '../src/cli/index.ts';
 import type { CliApp } from '../src/cli/index.ts';
-import { defineConfig } from '../src/config.ts';
+import { defaultConfig, defineConfig } from '../src/config.ts';
 import type { LoopEvent } from '../src/kernel/agent-loop.ts';
 import type { HarnessEvent } from '../src/kernel/events.ts';
 import {
@@ -86,8 +88,14 @@ import {
 } from '../src/llm/index.ts';
 import type { RealProviderConfig } from '../src/llm/index.ts';
 import type { ConfirmHandler } from '../src/permission/gate.ts';
+import {
+  describePermissionMode,
+  parsePermissionMode,
+  PERMISSION_MODES,
+} from '../src/permission/modes.ts';
 import { resolveStorePath } from '../src/session/store.ts';
 import { userMessage } from '../src/types.ts';
+import type { PermissionMode } from '../src/types.ts';
 
 // 可选：把项目根 .env 载入环境（必须在任何 process.env 读取之前——含下方端口解析）
 loadDotEnv();
@@ -157,7 +165,13 @@ type UiNotice =
       readonly reason: 'user' | 'timeout';
     }
   | { readonly ch: 'ui'; readonly type: 'reset'; readonly sessionId: string }
-  | { readonly ch: 'ui'; readonly type: 'provider_changed'; readonly provider: ProviderInfo };
+  | { readonly ch: 'ui'; readonly type: 'provider_changed'; readonly provider: ProviderInfo }
+  | {
+      readonly ch: 'ui';
+      readonly type: 'permission_mode_changed';
+      readonly mode: PermissionMode;
+      readonly description: string;
+    };
 
 /** 广播到浏览器的一条线缆消息（三种频道：harness / loop / ui） */
 type WireMessage =
@@ -216,6 +230,13 @@ let realConfig: RealProviderConfig | null = null;
  *   - reset：置空（下次 bootApp 生成新会话）。
  */
 let currentSessionId: string | undefined;
+
+/**
+ * 权限模式跨重建接力棒（切换 Provider / reset 都保留——模式是进程的
+ * 运行姿态，不是某次会话的属性）。重建前从旧实例读回，bootApp 时传给
+ * 新实例；运行期真相始终在 app.permissionMode.mode（本变量仅作接力）。
+ */
+let permissionModeSnapshot: PermissionMode = defaultConfig.permission.mode;
 
 interface PendingConfirm {
   readonly settle: (approved: boolean, reason: 'user' | 'timeout') => void;
@@ -287,6 +308,7 @@ function bootApp(): void {
         : () => new OpenAICompatibleProvider({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl }),
     ...(currentSessionId === undefined ? {} : { sessionId: currentSessionId }),
     confirm: confirmBridge,
+    permissionMode: permissionModeSnapshot, // 跨重建接力（切 Provider / reset 不丢姿态）
   });
   currentSessionId = app.sessionId;
   // 通道①：HarnessEvent 全量订阅（Tracer 同款做法）——诊断流
@@ -311,6 +333,7 @@ function applyProvider(
         readonly presetId: string;
       },
 ): void {
+  permissionModeSnapshot = app.permissionMode.mode; // 接力棒：重建不丢运行姿态
   unsubscribeBus();
   app.dispose();
   if (next.kind === 'demo') {
@@ -455,6 +478,8 @@ function openStream(res: ServerResponse): void {
       busy: activeQuery !== null,
       wireLength: wire.length,
       provider: providerInfo,
+      permissionMode: app.permissionMode.mode,
+      permissionModeDescription: describePermissionMode(app.permissionMode.mode),
     })}\n\n`,
   );
   for (const entry of wire) res.write(`data: ${entry.json}\n\n`);
@@ -492,6 +517,8 @@ function sessionSnapshot(): Record<string, unknown> {
     wireLength: wire.length,
     wireSeq,
     provider: providerInfo,
+    permissionMode: app.permissionMode.mode,
+    permissionModeDescription: describePermissionMode(app.permissionMode.mode),
   };
 }
 
@@ -500,6 +527,7 @@ function sessionSnapshot(): Record<string, unknown> {
  * 同库不同会话 = 「跨会话记忆」演示的正规路径（记忆存库、不随会话走）。
  */
 function resetApp(): void {
+  permissionModeSnapshot = app.permissionMode.mode; // 接力棒（模式与「新会话」无关）
   unsubscribeBus();
   app.dispose();
   wire.length = 0;
@@ -529,6 +557,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       // 当前 Provider 元数据 + 预设表（设置面板的「自由选择」数据源；
       // key 原文永不回传——只有 hasApiKey 布尔）
       sendJson(res, 200, { provider: providerInfo, presets: OPENAI_COMPATIBLE_PRESETS });
+      return;
+    }
+    if (path === '/api/permission-mode') {
+      // 只读视图：模式 + 描述 + 可选值表（展示文案与 CLI 同源——不前端重写）
+      sendJson(res, 200, {
+        mode: app.permissionMode.mode,
+        description: describePermissionMode(app.permissionMode.mode),
+        modes: PERMISSION_MODES,
+      });
       return;
     }
   }
@@ -563,6 +600,26 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }
       pendingConfirm.settle(body['approve'] === true, 'user');
       sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (path === '/api/permission-mode') {
+      // 切换模式（与查询并发安全：控制器读写在每次 check 时取最新值，无需单飞锁）
+      const body = await readJson(req);
+      const parsed = typeof body['mode'] === 'string' ? parsePermissionMode(body['mode']) : undefined;
+      if (parsed === undefined) {
+        sendJson(res, 400, {
+          error: `mode 必须是 ${PERMISSION_MODES.join(' / ')} 之一（收到 ${JSON.stringify(body['mode'])}）`,
+        });
+        return;
+      }
+      app.permissionMode.setMode(parsed);
+      broadcast({
+        ch: 'ui',
+        type: 'permission_mode_changed',
+        mode: parsed,
+        description: describePermissionMode(parsed),
+      }); // 多客户端同步（描述与 CLI 同源）
+      sendJson(res, 200, { ok: true, mode: parsed, description: describePermissionMode(parsed) });
       return;
     }
     if (path === '/api/provider') {
@@ -684,6 +741,18 @@ function shutdown(): void {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+// 端口占用（EADDRINUSE）等监听错误的友好退出：默认行为是抛一个裸异常栈，
+// 对「另一个控制台还在跑」这种最常见的本地场景毫无可读性
+server.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`\n✗ 端口 ${PORT} 已被占用——另一个网页控制台可能仍在运行。`);
+    console.error('  处理：关闭旧进程，或用 HARNESS_WEB_PORT=<其他端口> 重新启动。');
+  } else {
+    console.error(`\n✗ 网页控制台启动失败：${describeError(error)}`);
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
   console.log('');
   console.log('harness-lab 网页控制台（第四条壳：HTTP + SSE）');
@@ -693,6 +762,9 @@ server.listen(PORT, HOST, () => {
     providerInfo.kind === 'demo'
       ? '  模型    演示规则 Provider（离线确定性；chunkDelayMs=6）'
       : `  模型    真实 API：${providerInfo.model} @ ${providerInfo.baseUrl}`,
+  );
+  console.log(
+    `  权限    ${app.permissionMode.mode}—— ${describePermissionMode(app.permissionMode.mode)}（页面顶栏可切换）`,
   );
   console.log('  设置    页面顶栏「服务设置」：预设服务商 / 自定义 URL / 连通测试');
   console.log('  提示    页面底部播放条可「从头回放 / 单步 / 变速」观察整条主链路');

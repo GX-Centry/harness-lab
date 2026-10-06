@@ -192,6 +192,12 @@ body {
 .chip-provider { cursor: default; }
 .chip-provider.chip-real { color: var(--accent); border-color: rgba(34, 197, 94, 0.45); background: var(--accent-soft); }
 
+/* 顶栏权限模式徽章（w18）：manual=中性 / semi=琥珀 / auto=绿；点击循环切换 */
+.chip-mode { cursor: pointer; user-select: none; }
+.chip-mode.mode-manual { color: var(--fg-dim); }
+.chip-mode.mode-semi { color: var(--amber); border-color: rgba(245, 158, 11, 0.45); }
+.chip-mode.mode-auto { color: var(--accent); border-color: rgba(34, 197, 94, 0.45); background: var(--accent-soft); }
+
 .overlay {
   position: fixed;
   inset: 0;

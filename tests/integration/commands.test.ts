@@ -1,5 +1,5 @@
 /**
- * 命令层集成测试 —— router + 五个内置命令的端到端验证。
+ * 命令层集成测试 —— router + 七个内置命令的端到端验证。
  *
  * 装配完整性（与本项目其它集成测试同款「全真链路」）：
  *   ToolRegistry → Dispatcher → FakeProvider → ContextManager → AgentLoop
@@ -8,7 +8,7 @@
  *
  * 覆盖矩阵：
  *   ① 拦截语义：普通输入不属于命令层（返回 undefined，交给 LLM 路径）；
- *   ② 五个内置命令的输出正确性（/help /status /history /compact /skill）；
+ *   ② 七个内置命令的输出正确性（/help /status /history /compact /skill /mode /hooks）；
  *   ③ 边界与降级：参数非法、未知命令、空命令、依赖未装配；
  *   ④ 控制面稳态：命令内部异常被兜底为失败文本 + ok=false 事件；
  *   ⑤ 硬证据：执行命令不产生任何 LLM 请求（「命令不进模型」的终极断言）。
@@ -22,6 +22,7 @@ import type { CommandContext } from '../../src/commands/types.ts';
 import { defineConfig } from '../../src/config.ts';
 import type { DeepPartial, HarnessConfig } from '../../src/config.ts';
 import { ContextManager } from '../../src/context/manager.ts';
+import { createDefaultHooks } from '../../src/hooks/builtin/index.ts';
 import { HookPipeline } from '../../src/hooks/pipeline.ts';
 import { AgentLoop } from '../../src/kernel/agent-loop.ts';
 import { Dispatcher } from '../../src/kernel/dispatcher.ts';
@@ -30,6 +31,7 @@ import { EventBus } from '../../src/kernel/events.ts';
 import { FakeProvider } from '../../src/llm/fake-provider.ts';
 import type { FakeTurn } from '../../src/llm/fake-provider.ts';
 import { PermissionGate } from '../../src/permission/gate.ts';
+import { createPermissionModeController } from '../../src/permission/modes.ts';
 import { SessionManager } from '../../src/session/session-manager.ts';
 import { SessionStore } from '../../src/session/store.ts';
 import { createBuiltinSkills } from '../../src/skills/builtin.ts';
@@ -37,6 +39,7 @@ import { SkillRegistry } from '../../src/skills/registry.ts';
 import { SkillRunner } from '../../src/skills/runner.ts';
 import { createBuiltinTools } from '../../src/tools/builtin/index.ts';
 import { ToolRegistry } from '../../src/tools/registry.ts';
+import type { PermissionMode } from '../../src/types.ts';
 
 // ---------------------------------------------------------------------------
 // 测试装置：完整「REPL」装配
@@ -60,6 +63,12 @@ interface FixtureOptions {
   readonly overrides?: DeepPartial<HarnessConfig>;
   /** 模拟「最小装配」：不接技能层（/skill 应给出降级提示） */
   readonly withoutSkills?: boolean;
+  /** 模拟「无权限模式控制器」装配（/mode 应给出降级提示） */
+  readonly withoutPermissionMode?: boolean;
+  /** 初始权限模式（缺省 manual——fixture 与真实装配同缺省） */
+  readonly permissionMode?: PermissionMode;
+  /** 使用默认 hook 集合（缺省空管道——避免 hook 行为干扰既有用例） */
+  readonly withDefaultHooks?: boolean;
 }
 
 function makeFixture(options: FixtureOptions = {}): CmdFixture {
@@ -74,7 +83,13 @@ function makeFixture(options: FixtureOptions = {}): CmdFixture {
   const events: HarnessEvent[] = [];
   bus.on('*', (event) => events.push(event));
 
-  const hooks = new HookPipeline({ hooks: [], bus });
+  const hooks = new HookPipeline({
+    hooks:
+      options.withDefaultHooks === true
+        ? createDefaultHooks({ repeatCallThreshold: config.hooks.repeatCallThreshold })
+        : [],
+    bus,
+  });
   const permission = new PermissionGate({ config: config.permission });
   const dispatcher = new Dispatcher({ registry: tools, hooks, permission, bus, config });
 
@@ -111,12 +126,24 @@ function makeFixture(options: FixtureOptions = {}): CmdFixture {
   const registry = new CommandRegistry();
   for (const command of createBuiltinCommands(registry)) registry.register(command);
 
+  // 权限模式控制器（w18）：与真实装配同构——gate 持控制器引用，命令层改它
+  const permissionModeController =
+    options.withoutPermissionMode === true
+      ? undefined
+      : createPermissionModeController(options.permissionMode ?? 'manual');
+  const permissionWithMode =
+    permissionModeController === undefined
+      ? {}
+      : { permissionMode: permissionModeController };
+
   const buildContext = (sessionId: string): CommandContext => ({
     sessionId,
     manager,
     store,
     contextManager,
     skills,
+    ...permissionWithMode,
+    hooks,
     workingDir: process.cwd(),
     bus,
     config,
@@ -171,8 +198,8 @@ describe('/help', () => {
   it('无参列出全部内置命令', async () => {
     const f = makeFixture();
     const text = await f.handle('c1', '/help');
-    expect(text).toContain('可用命令（5 个）');
-    for (const name of ['/help', '/status', '/history', '/compact', '/skill']) {
+    expect(text).toContain('可用命令（7 个）');
+    for (const name of ['/help', '/status', '/history', '/compact', '/skill', '/mode', '/hooks']) {
       expect(text).toContain(name);
     }
   });
@@ -286,6 +313,68 @@ describe('/skill', () => {
   it('技能层未装配时给出降级提示', async () => {
     const f = makeFixture({ withoutSkills: true });
     expect(await f.handle('c1', '/skill')).toContain('未装配技能层');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /mode（w18：全自动 / 半自动的运行姿态控制面）
+// ---------------------------------------------------------------------------
+
+describe('/mode', () => {
+  it('无参显示当前模式、一句话描述与可选值', async () => {
+    const f = makeFixture();
+    const text = await f.handle('c1', '/mode');
+    expect(text).toContain('当前权限模式：manual');
+    expect(text).toContain('每个确认决策都询问用户');
+    expect(text).toContain('manual / semi / auto');
+  });
+
+  it('切换后立即生效（再查看显示新值）', async () => {
+    const f = makeFixture();
+    const switched = await f.handle('c1', '/mode semi');
+    expect(switched).toContain('权限模式已切换：semi');
+    const after = await f.handle('c1', '/mode');
+    expect(after).toContain('当前权限模式：semi');
+  });
+
+  it('接受大小写与空白宽容写法（SEMI / auto）', async () => {
+    const f = makeFixture();
+    expect(await f.handle('c1', '/mode SEMI')).toContain('已切换：semi');
+    expect(await f.handle('c1', '/mode auto')).toContain('已切换：auto');
+  });
+
+  it('非法模式给出可选值提示（不改变当前模式）', async () => {
+    const f = makeFixture();
+    const text = await f.handle('c1', '/mode turbo');
+    expect(text).toContain('未知模式 "turbo"');
+    expect(text).toContain('manual / semi / auto');
+    expect(await f.handle('c1', '/mode')).toContain('当前权限模式：manual');
+  });
+
+  it('未装配控制器时给出降级提示', async () => {
+    const f = makeFixture({ withoutPermissionMode: true });
+    expect(await f.handle('c1', '/mode')).toContain('未装配权限模式控制器');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /hooks（横切逻辑可见性：静态列出管道内注册的 hook）
+// ---------------------------------------------------------------------------
+
+describe('/hooks', () => {
+  it('列出已注册 hook（名称 / 优先级 / 监听事件，按执行顺序）', async () => {
+    const f = makeFixture({ withDefaultHooks: true });
+    const text = await f.handle('c1', '/hooks');
+    expect(text).toContain('已注册 hook（4 个，按执行顺序');
+    for (const name of ['repeat-guard', 'audit', 'redact-result', 'truncate-result']) {
+      expect(text).toContain(name);
+    }
+    expect(text).toContain('priority');
+  });
+
+  it('空管道给出直通提示（不是错误）', async () => {
+    const f = makeFixture();
+    expect(await f.handle('c1', '/hooks')).toContain('未注册任何 hook');
   });
 });
 

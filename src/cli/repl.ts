@@ -178,7 +178,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   if (app.resumeReport !== undefined) {
     write(`${formatResumeReport(app.resumeReport)}\n`);
   }
-  write('（/exit 退出 · Ctrl+C 取消当前对话 · /help 查看命令）\n');
+  write('（/exit 退出 · Ctrl+C 取消当前对话 · /help 查看命令 · /mode 切换权限模式）\n');
 
   // ---- 取消/退出状态（壳的私有状态，芯完全不知情）----
   let activeQuery: AbortController | undefined;

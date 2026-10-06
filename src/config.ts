@@ -22,7 +22,7 @@
  */
 
 import { HarnessError } from './errors.ts';
-import type { PermissionDecision, RiskLevel } from './types.ts';
+import type { PermissionDecision, PermissionMode, RiskLevel } from './types.ts';
 
 // ===========================================================================
 // §1 配置形状（分域接口）
@@ -103,6 +103,15 @@ export interface ContextConfig {
 
 /** 权限域 */
 export interface PermissionConfig {
+  /**
+   * 默认权限模式（w18——「全自动 / 半自动」的运行姿态）：
+   *   manual 全手动——每个 confirm 决策都询问（缺省，最安全）；
+   *   semi   半自动——low/medium 自动放行，high/critical 仍询问；
+   *   auto   全自动——confirm 决策自动批准（rules 显式 deny 仍拦截）。
+   * 覆盖链（优先级从高到低）：CLI --mode > --yes（= auto 别名）>
+   * 环境变量 HARNESS_PERMISSION_MODE > 本字段。运行期可用 /mode 切换。
+   */
+  readonly mode: PermissionMode;
   /**
    * 按风险级的默认策略（规则层未命中时的兜底决策）。
    * 权衡：critical 默认 confirm 而非 deny——deny 会让高危工具完全不可用，
@@ -271,6 +280,7 @@ export const defaultConfig: HarnessConfig = {
     defaultTimeoutMs: 30_000,
   },
   permission: {
+    mode: 'manual',
     policyByRisk: {
       low: 'allow',
       medium: 'confirm',

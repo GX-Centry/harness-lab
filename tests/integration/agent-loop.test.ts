@@ -195,7 +195,7 @@ describe('AgentLoop 基础路径', () => {
     });
   });
 
-  it('system prompt 注入：置于消息首位；history 已含 system 时不重复注入', async () => {
+  it('system prompt 注入：置于消息首位；history 已含 system 时刷新为最新值（不重复）', async () => {
     const f1 = makeFixture([{ text: 'ok' }], { systemPrompt: '你是演示助手' });
     await collect(f1.loop.run('hi', [], mkCtx()));
     expect(f1.provider.requests[0]?.messages[0]).toMatchObject({
@@ -203,11 +203,12 @@ describe('AgentLoop 基础路径', () => {
       content: '你是演示助手',
     });
 
-    // 已有 system 的形态（w10 Session 恢复后的场景）
+    // 已有 system 的形态（w10 Session 恢复后的场景）——w18 起刷新为当前
+    // systemPrompt（旧快照可能缺少工具/技能清单），消息数不增
     const f2 = makeFixture([{ text: 'ok' }], { systemPrompt: '你是演示助手' });
     const historyWithSystem: Message[] = [systemMessage('既有 system')];
     await collect(f2.loop.run('hi', historyWithSystem, mkCtx()));
-    expect(f2.provider.requests[0]?.messages[0]).toMatchObject({ content: '既有 system' });
+    expect(f2.provider.requests[0]?.messages[0]).toMatchObject({ content: '你是演示助手' });
     expect(
       f2.provider.requests[0]?.messages.filter((m) => m.role === 'system'),
     ).toHaveLength(1);

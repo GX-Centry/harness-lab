@@ -19,4 +19,6 @@ export * from './types.ts';
 export { SkillRegistry } from './registry.ts';
 export { SkillRunner } from './runner.ts';
 export type { SkillRunnerOptions, SkillRunOptions } from './runner.ts';
+export { skillToTool, skillToolName } from './tool-wrapper.ts';
+export type { SkillToolOptions } from './tool-wrapper.ts';
 export { mathReportSkill, createBuiltinSkills } from './builtin.ts';

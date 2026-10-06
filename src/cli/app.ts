@@ -36,6 +36,16 @@
  *   传入自实现 LLMProvider = 接真实模型（装配层零改动——接口在此兑现）。
  *   子代理的 Provider 由 options.subagentProviderFactory 单独指定
  *   （缺省 = 子世界演示规则；理由见 demo.ts）。
+ *
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │ 装配顺序的两个接缝（w18——错序会重现「模型面断链」）                    │
+ * └─────────────────────────────────────────────────────────────────────┘
+ *
+ *   ① 技能层（skill-as-tool）与子代理必须在 AgentLoop 构造**之前**：
+ *      system prompt 由 buildSystemPrompt 从「工具面 + 技能面」的注册现状
+ *      构建——先注册后建 prompt，模型才能看见技能；
+ *   ② 权限模式控制器在 PermissionGate 构造时按引用注入：gate 每次检查读
+ *      最新值，/mode 命令与 Web API 的切换立即生效（无需重建装配）。
  */
 
 import { randomUUID } from 'node:crypto';
@@ -47,6 +57,7 @@ import {
 import { defineConfig } from '../config.ts';
 import type { HarnessConfig } from '../config.ts';
 import { ContextManager } from '../context/manager.ts';
+import { buildSystemPrompt } from '../context/system-prompt.ts';
 import { createDefaultHooks } from '../hooks/builtin/index.ts';
 import { HookPipeline } from '../hooks/pipeline.ts';
 import { AgentLoop } from '../kernel/agent-loop.ts';
@@ -57,16 +68,24 @@ import { MemoryManager } from '../memory/manager.ts';
 import { MemoryStore } from '../memory/store.ts';
 import { PermissionGate } from '../permission/gate.ts';
 import type { ConfirmHandler } from '../permission/gate.ts';
+import { createPermissionModeController } from '../permission/modes.ts';
+import type { PermissionModeController } from '../permission/modes.ts';
 import { SessionManager } from '../session/session-manager.ts';
 import type { ResumeInfo } from '../session/session-manager.ts';
 import { SessionStore } from '../session/store.ts';
-import { SkillRegistry, SkillRunner, createBuiltinSkills } from '../skills/index.ts';
+import {
+  SkillRegistry,
+  SkillRunner,
+  createBuiltinSkills,
+  skillToTool,
+  skillToolName,
+} from '../skills/index.ts';
 import type { SkillServices } from '../skills/index.ts';
 import { registerAgentTools } from '../subagent/index.ts';
 import type { SubAgentDefinition, SubAgentDeps } from '../subagent/index.ts';
 import { createBuiltinTools } from '../tools/builtin/index.ts';
 import { ToolRegistry } from '../tools/registry.ts';
-import type { LLMProvider } from '../types.ts';
+import type { LLMProvider, PermissionMode } from '../types.ts';
 import { createDemoProvider, createSubagentDemoProvider } from './demo.ts';
 
 // ===========================================================================
@@ -103,6 +122,13 @@ export interface CliAppOptions {
    * medium+ 工具被拒——与 PermissionGate 的默认策略一致）。
    */
   readonly confirm?: ConfirmHandler;
+  /**
+   * 初始权限模式（w18；缺省 = config.permission.mode）。
+   * main.ts 按 --mode > --yes(=auto) > HARNESS_PERMISSION_MODE 解析后传入；
+   * Web 壳在重建装配（切换 Provider/reset）时把上一实例的当前模式快照
+   * 回传——模式因此跨重建保持。运行期切换走 /mode 命令或控制器 API。
+   */
+  readonly permissionMode?: PermissionMode;
   /** 全量配置（测试可注入小配置；缺省 defineConfig()） */
   readonly config?: HarnessConfig;
   /** 模型来源（唯一替换点；缺省 = 演示规则 Provider） */
@@ -125,6 +151,12 @@ export interface CliApp {
   readonly manager: SessionManager;
   readonly commandRouter: CommandRouter;
   readonly bus: EventBus;
+  /**
+   * 权限模式控制器（w18）—— 壳与命令层共享的「模式单一真源」：
+   * 横幅/Web chip 读取它展示，/mode 命令与 Web API 通过 setMode 切换，
+   * PermissionGate 持有同一引用（切换立刻对后续检查生效）。
+   */
+  readonly permissionMode: PermissionModeController;
   /**
    * 芯：一行输入 → 输出事件流。
    * 空行 = 无输出；致命异常向上抛（壳负责显示与续命）。signal 用于取消
@@ -168,10 +200,16 @@ export function createCliApp(options: CliAppOptions): CliApp {
   // ---- 2. 事件总线 / Hook 管道 / 权限门（横切三件套）----
   const bus = new EventBus();
   const hooks = new HookPipeline({ hooks: createDefaultHooks(config.hooks), bus });
+  // 权限模式控制器（w18）：模式的可变单一真源——初始值来自 options
+  // （main.ts 解析 --mode/--yes/环境变量后传入），缺省取 config 缺省。
+  // gate 持有**引用**：/mode 切换立刻对后续每次权限检查生效。
+  const permissionMode = createPermissionModeController(options.permissionMode ?? config.permission.mode);
   const permission = new PermissionGate({
     config: config.permission,
-    // fail-safe 缺省：无确认通道 = 拒绝（不是放行——安全默认值）
+    // fail-safe 缺省：无确认通道 = 拒绝（不是放行——安全默认值；
+    // auto 模式的「不问」是用户显式声明的姿态，与通道是否存在无关）
     confirm: options.confirm ?? (() => Promise.resolve(false)),
+    mode: permissionMode,
   });
 
   // ---- 3. Dispatcher（所有工具调用的唯一入口）----
@@ -185,71 +223,22 @@ export function createCliApp(options: CliAppOptions): CliApp {
     bus,
   });
 
-  // ---- 5. AgentLoop（内核）----
-  const loop = new AgentLoop({
-    provider,
-    dispatcher,
-    registry,
-    bus,
-    config,
-    contextManager,
-    systemPrompt: '你是 harness-lab 的演示助手，回答简洁、诚实。',
-  });
-
-  // ---- 6. 持久化：SessionStore + MemoryStore（同一 SQLite 文件）----
-  const store = new SessionStore(options.dbPath);
-  const memoryStore = new MemoryStore(options.dbPath);
-  const memoryManager = new MemoryManager({ store: memoryStore, config: config.memory, bus });
-
-  // ---- 7. SessionManager（query 编排：持久化接缝 + 记忆接缝的消费方）----
-  const manager = new SessionManager({
-    store,
-    loop,
-    bus,
-    config,
-    workingDir: process.cwd(),
-    memory: memoryManager,
-  });
-  // ---- 7.5 会话就位：解析目标 → 存在判断 → 状态门控恢复 ----
-  // 两条真实约束（均为 w10 契约的一部分，装配层必须尊重而非绕过）：
-  //   - createSession **不幂等**：同 id 重复创建抛 input_error → 先 getSession；
-  //   - resumeSession **只对 interrupted / processing 有意义**（其余状态抛
-  //     「无需恢复」）→ 门控调用，而不是无条件调。
-  const sessionId = resolveSessionId(manager, options);
-  let resumeReport: ResumeInfo | undefined;
-  const existing = manager.getSession(sessionId);
-  if (existing === undefined) {
-    manager.createSession(sessionId); // 新会话（空库 / 首见 id）
-  } else if (existing.state === 'interrupted' || existing.state === 'processing') {
-    resumeReport = manager.resumeSession(sessionId); // 补位 + 僵尸态修正
-  }
-  // existing 为 created / completed / failed：无需恢复流程——直接以新 query 继续。
-
-  // ---- 8. 技能层（确定性编排）----
+  // ---- 5. 技能层（确定性编排）+ skill-as-tool 注册（w18）----
+  // 为什么注册进工具面？v1 技能只能从 /skill 命令触发——模型面（tools
+  // 参数）看不到任何技能（真实 API 下「技能无法被访问/调用」的根因）。
+  // 包装成 Tool 后：模型决定「何时用」（策略），SkillRunner 保证「怎么走」
+  // （流程）——与「Agent-as-Tool」（子代理）同一思想；包装层零执行逻辑，
+  // 技能执行仍收敛到 Dispatcher 同一条四步链（权限/hook/审计照常）。
   const skillRegistry = new SkillRegistry();
-  for (const skill of createBuiltinSkills()) skillRegistry.register(skill);
   const skillRunner = new SkillRunner({ registry: skillRegistry, tools: registry, dispatcher, bus });
   const skills: SkillServices = { registry: skillRegistry, runner: skillRunner };
+  for (const skill of createBuiltinSkills()) {
+    skillRegistry.register(skill);
+    // 超时预算：单步预算 × 步骤数 + 余量（skillToTool 内部计算）
+    registry.register(skillToTool(skill, skillRunner, { perStepTimeoutMs: config.tools.defaultTimeoutMs }));
+  }
 
-  // ---- 9. 命令层（进 LLM 之前拦截）----
-  const commandRegistry = new CommandRegistry();
-  for (const command of createBuiltinCommands(commandRegistry)) commandRegistry.register(command);
-  const commandRouter = new CommandRouter({
-    registry: commandRegistry,
-    bus,
-    buildContext: (sid) => ({
-      sessionId: sid,
-      manager,
-      store,
-      contextManager,
-      skills,
-      workingDir: process.cwd(),
-      bus,
-      config,
-    }),
-  });
-
-  // ---- 10. 子代理层（Agent-as-Tool：模型可派 researcher）----
+  // ---- 6. 子代理层（Agent-as-Tool：模型可派 researcher）----
   const subagentDefinitions: readonly SubAgentDefinition[] = [
     {
       name: 'researcher',
@@ -268,6 +257,79 @@ export function createCliApp(options: CliAppOptions): CliApp {
     providerFactory: options.subagentProviderFactory ?? (() => createSubagentDemoProvider()),
   };
   registerAgentTools(registry, subagentDefinitions, subagentDeps);
+
+  // ---- 7. System prompt（模型面暴露，w18）+ AgentLoop（内核）----
+  // 顺序接缝：prompt 的工具/技能清单来自**已完成的注册现状**——技能与
+  // 子代理必须先注册完毕（错序 = 模型不知道它们存在，「模型面断链」重现）。
+  const systemPrompt = buildSystemPrompt({
+    workingDir: process.cwd(),
+    platform: process.platform,
+    tools: registry.list().map((tool) => ({ name: tool.name, description: tool.description })),
+    skills: skillRegistry.list().map((skill) => ({
+      name: skill.name,
+      toolName: skillToolName(skill.name),
+      description: skill.description,
+      stepCount: skill.steps.length,
+    })),
+  });
+  const loop = new AgentLoop({
+    provider,
+    dispatcher,
+    registry,
+    bus,
+    config,
+    contextManager,
+    systemPrompt,
+  });
+
+  // ---- 8. 持久化：SessionStore + MemoryStore（同一 SQLite 文件）----
+  const store = new SessionStore(options.dbPath);
+  const memoryStore = new MemoryStore(options.dbPath);
+  const memoryManager = new MemoryManager({ store: memoryStore, config: config.memory, bus });
+
+  // ---- 9. SessionManager（query 编排：持久化接缝 + 记忆接缝的消费方）----
+  const manager = new SessionManager({
+    store,
+    loop,
+    bus,
+    config,
+    workingDir: process.cwd(),
+    memory: memoryManager,
+  });
+  // ---- 9.5 会话就位：解析目标 → 存在判断 → 状态门控恢复 ----
+  // 两条真实约束（均为 w10 契约的一部分，装配层必须尊重而非绕过）：
+  //   - createSession **不幂等**：同 id 重复创建抛 input_error → 先 getSession；
+  //   - resumeSession **只对 interrupted / processing 有意义**（其余状态抛
+  //     「无需恢复」）→ 门控调用，而不是无条件调。
+  const sessionId = resolveSessionId(manager, options);
+  let resumeReport: ResumeInfo | undefined;
+  const existing = manager.getSession(sessionId);
+  if (existing === undefined) {
+    manager.createSession(sessionId); // 新会话（空库 / 首见 id）
+  } else if (existing.state === 'interrupted' || existing.state === 'processing') {
+    resumeReport = manager.resumeSession(sessionId); // 补位 + 僵尸态修正
+  }
+  // existing 为 created / completed / failed：无需恢复流程——直接以新 query 继续。
+
+  // ---- 10. 命令层（进 LLM 之前拦截）----
+  const commandRegistry = new CommandRegistry();
+  for (const command of createBuiltinCommands(commandRegistry)) commandRegistry.register(command);
+  const commandRouter = new CommandRouter({
+    registry: commandRegistry,
+    bus,
+    buildContext: (sid) => ({
+      sessionId: sid,
+      manager,
+      store,
+      contextManager,
+      skills,
+      permissionMode, // /mode 命令：读写模式控制器（引用共享）
+      hooks, // /hooks 命令：只读展示横切管道
+      workingDir: process.cwd(),
+      bus,
+      config,
+    }),
+  });
 
   // ---- 11. 芯：一行输入 → 输出事件流 ----
   async function* handleLine(line: string, signal: AbortSignal): AsyncGenerator<CliOutput, void, void> {
@@ -295,6 +357,7 @@ export function createCliApp(options: CliAppOptions): CliApp {
     manager,
     commandRouter,
     bus,
+    permissionMode,
     handleLine,
     dispose: () => {
       if (disposed) return; // 幂等（与 Tracer/CostTracker.dispose 同一约定）

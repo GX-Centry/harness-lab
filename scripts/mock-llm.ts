@@ -12,11 +12,14 @@
  *   POST /v1/chat/completions   流式 SSE（含 usage 末块）/ 非流式 JSON
  *
  * == mock 的「智能」：确定性规则（不是 AI，是状态机）==
- *   1. 最后一条是 user、请求声明了 calculator 工具、文本里有算式
+ *   1. 最后一条是 user、请求声明了 skill_ 前缀工具（技能的模型面暴露面）
+ *      且文本提到 技能/skill/报告/report → tool_call(skill_xxx, {input})——
+ *      驱动「模型调用技能」的完整链路（w18 技能进模型面的端到端靶子）；
+ *   2. 最后一条是 user、请求声明了 calculator 工具、文本里有算式
  *      → tool_call(calculator, {expression})（参数按 OpenAI 协议分片发送）；
- *   2. 最后一条是 tool 结果 → 文本总结回合（把结果念出来——模拟「工具回写后
+ *   3. 最后一条是 tool 结果 → 文本总结回合（把结果念出来——模拟「工具回写后
  *      模型收尾」；驱动 harness 的完整工具循环）；
- *   3. 其他 → 自我介绍文本。
+ *   4. 其他 → 自我介绍文本。
  *
  * == 故障注入彩蛋（演示错误路径）==
  *   model=mock-500   请求直接 500（演示 provider_error / 重试判定）
@@ -70,6 +73,12 @@ function hasCalculatorTool(body: ChatRequestBody): boolean {
   return (body.tools ?? []).some((t) => t.function?.name === 'calculator');
 }
 
+/** 请求里第一个技能工具（skill_ 前缀——w18 起技能会出现在模型面 tools 参数里） */
+function firstSkillTool(body: ChatRequestBody): string | undefined {
+  return (body.tools ?? []).find((t) => t.function?.name?.startsWith('skill_') === true)
+    ?.function?.name;
+}
+
 function lastMessage(body: ChatRequestBody): ChatMessage | undefined {
   const messages = body.messages ?? [];
   return messages[messages.length - 1];
@@ -91,7 +100,7 @@ function extractExpression(text: string): string | undefined {
 function planTurn(body: ChatRequestBody): TurnPlan {
   const last = lastMessage(body);
 
-  // 规则 2：工具结果刚回来 → 收尾文本（把结果念出来）
+  // 规则 3：工具结果刚回来 → 收尾文本（把结果念出来）
   if (last?.role === 'tool') {
     const result = (last.content ?? '').slice(0, 120);
     return {
@@ -100,7 +109,23 @@ function planTurn(body: ChatRequestBody): TurnPlan {
     };
   }
 
-  // 规则 1：声明了 calculator 且有算式 → 发起工具调用
+  // 规则 1（w18）：技能触发——请求声明了 skill_ 前缀工具（技能的模型面暴露）
+  // 且文本提到技能/报告 → 发起技能工具调用。输入取算式（若有）；无算式时
+  // 省略 input 字段（技能自行回退默认输入——mock 不把自然语言当算式传进去）。
+  if (last?.role === 'user') {
+    const skillTool = firstSkillTool(body);
+    if (skillTool !== undefined && /技能|skill|报告|report/i.test(last.content ?? '')) {
+      const expression = extractExpression(last.content ?? '');
+      return {
+        kind: 'tool',
+        name: skillTool,
+        argsJson: expression === undefined ? '{}' : JSON.stringify({ input: expression }),
+        text: '这个任务适合用技能完成——让我调用技能工具。',
+      };
+    }
+  }
+
+  // 规则 2：声明了 calculator 且有算式 → 发起工具调用
   if (last?.role === 'user' && hasCalculatorTool(body)) {
     const expression = extractExpression(last.content ?? '');
     if (expression !== undefined) {
@@ -113,12 +138,13 @@ function planTurn(body: ChatRequestBody): TurnPlan {
     }
   }
 
-  // 规则 3：兜底自我介绍
+  // 规则 4：兜底自我介绍
   return {
     kind: 'text',
     text:
       '（mock 模型）你好！我是本地 OpenAI 兼容 mock 服务。' +
       '试试「帮我算 12*(3+4)」——如果请求里声明了 calculator 工具，我会发起一次真实的工具调用；' +
+      '试试「用技能出个计算报告 21*2」——如果声明了 skill_ 前缀工具，我会改为调用技能工具；' +
       '工具结果回写后，我会再产出总结回复。',
   };
 }

@@ -59,6 +59,14 @@ export class HookPipeline {
   }
 
   /**
+   * 全部已注册 hook（按执行顺序——priority 升序、同级按注册序）。
+   * 只读视图：供 /hooks 命令与诊断展示（「这个装配挂了哪些横切逻辑」）。
+   */
+  get registeredHooks(): readonly Hook[] {
+    return this.sorted;
+  }
+
+  /**
    * 运行一次管道。
    *
    * @param payload 调用方构造的载荷（含 event / sessionId / queryId / toolCall 等；
